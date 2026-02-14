@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -52,6 +53,35 @@ class _DriverHomePageState extends State<DriverHomePage> {
     setupRealtimeSubscription();
   }
 
+  
+  // --- 🗺️ دالة فتح الخرائط (تمت إضافتها هنا) ---
+  Future<void> openMap(double lat, double lng) async {
+    // رابط خرائط جوجل للملاحة
+    final Uri googleMapsUrl = Uri.parse("google.navigation:q=$lat,$lng&mode=d");
+    
+    // رابط عام (يعمل على الآيفون أيضاً)
+    final Uri appleMapsUrl = Uri.parse("https://maps.apple.com/?daddr=$lat,$lng");
+
+    try {
+      if (await canLaunchUrl(googleMapsUrl)) {
+        await launchUrl(googleMapsUrl);
+      } else if (await canLaunchUrl(appleMapsUrl)) {
+        await launchUrl(appleMapsUrl);
+      } else {
+        // إذا فشل، نفتح الرابط في المتصفح
+        final Uri webUrl = Uri.parse("https://www.google.com/maps/dir/?api=1&destination=$lat,$lng");
+        await launchUrl(webUrl, mode: LaunchMode.externalApplication);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('لا يمكن فتح الخرائط: $e')),
+        );
+      }
+    }
+  }
+  // ---------------------------------------------
+  
   // جلب المهام (الطلبات الجاهزة + التي بحوزة السائق)
   Future<void> fetchTasks() async {
     try {
@@ -89,22 +119,47 @@ class _DriverHomePageState extends State<DriverHomePage> {
   }
 
   // تغيير حالة الطلب
+  // تغيير حالة الطلب
   Future<void> updateOrderStatus(String id, String newStatus) async {
-    await supabase.from('orders').update({'status': newStatus}).eq('id', id);
-    
-    // رسالة تأكيد
-    if (mounted) {
-      String message = newStatus == 'on_way' 
-          ? 'تم استلام الطلب! انطلق للعميل 🛵' 
-          : 'تم توصيل الطلب بنجاح! 💵';
-      
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(message),
-          backgroundColor: newStatus == 'on_way' ? Colors.blue : Colors.green,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+    try {
+      // 1. تحديث قاعدة البيانات
+      await supabase.from('orders').update({'status': newStatus}).eq('id', id);
+
+      // 2. تحديث الواجهة فوراً (بدون انتظار إعادة التحميل من السيرفر)
+      setState(() {
+        if (newStatus == 'delivered') {
+          // إذا تم التسليم، نحذف الطلب من القائمة لأنه انتهى
+          tasks.removeWhere((task) => task['id'] == id);
+        } else {
+          // إذا تحول إلى "جاري التوصيل"، نحدث حالته داخل القائمة ليتحول الزر واللون
+          final index = tasks.indexWhere((task) => task['id'] == id);
+          if (index != -1) {
+            tasks[index]['status'] = newStatus;
+          }
+        }
+      });
+
+      // 3. رسالة تأكيد
+      if (mounted) {
+        String message = newStatus == 'on_way'
+            ? 'تم استلام الطلب! انطلق للعميل 🛵'
+            : 'تم توصيل الطلب بنجاح! 💵';
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(message),
+            backgroundColor: newStatus == 'on_way' ? Colors.blue : Colors.green,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      // في حال حدوث خطأ
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('حدث خطأ أثناء التحديث: $e'), backgroundColor: Colors.red),
+        );
+      }
     }
   }
 
@@ -141,6 +196,7 @@ class _DriverHomePageState extends State<DriverHomePage> {
   }
 
   // واجهة عند عدم وجود طلبات
+
   Widget _buildEmptyState() {
     return Center(
       child: Column(
@@ -159,24 +215,36 @@ class _DriverHomePageState extends State<DriverHomePage> {
     );
   }
 
-  // تصميم كارت المهمة
-  Widget _buildTaskCard(Map<String, dynamic> task) {
+
+Widget _buildTaskCard(Map<String, dynamic> task) {
     bool isOnWay = task['status'] == 'on_way';
+
+    // 🔍 طباعة للتأكد (ستظهر في الـ Console بالأسفل)
+    print("Checking Task #${task['id']}: lat=${task['lat']}, latitude=${task['latitude']}");
+
+    // 1. محاولة جلب البيانات سواء كان اسمها (latitude) أو (lat)
+    var rawLat = task['latitude'] ?? task['lat'];
+    var rawLng = task['longitude'] ?? task['lng'];
+
+    // 2. دالة صغيرة لتحويل البيانات إلى رقم (Double) بأمان
+    double? parseCoord(dynamic value) {
+      if (value == null) return null;
+      if (value is num) return value.toDouble(); // إذا كان رقماً
+      if (value is String) return double.tryParse(value); // إذا كان نصاً
+      return null;
+    }
+
+    double? lat = parseCoord(rawLat);
+    double? lng = parseCoord(rawLng);
 
     return Card(
       elevation: 4,
       margin: const EdgeInsets.only(bottom: 16),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-      // تغيير لون الحدود حسب الحالة
-      color: Colors.white,
-      surfaceTintColor: Colors.white,
       child: Container(
         decoration: BoxDecoration(
           border: Border(
-            right: BorderSide(
-              color: isOnWay ? Colors.blue : Colors.green, 
-              width: 6
-            ),
+            right: BorderSide(color: isOnWay ? Colors.blue : Colors.green, width: 6),
           ),
         ),
         child: Padding(
@@ -184,7 +252,7 @@ class _DriverHomePageState extends State<DriverHomePage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // الهيدر: رقم الطلب والحالة
+              // رقم الطلب وشارة الحالة
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -221,49 +289,83 @@ class _DriverHomePageState extends State<DriverHomePage> {
                 ],
               ),
               const Divider(height: 25),
-              
-              // التفاصيل
+
+              // العنوان
               _buildInfoRow(Icons.location_on, 'العنوان:', task['delivery_address'] ?? 'غير محدد'),
+
+              // 👇👇 منطق عرض الزر (معدل) 👇👇
+              if (lat != null && lng != null) ...[
+                // إذا وجدت الإحداثيات اعرض الزر
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12.0),
+                  child: InkWell(
+                    onTap: () => openMap(lat, lng),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        color: Colors.blue[50],
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.blue.shade200),
+                      ),
+                      child: const Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.map_outlined, size: 24, color: Colors.blue),
+                          SizedBox(width: 10),
+                          Text(
+                            "فتح الموقع على الخريطة 🗺️",
+                            style: TextStyle(
+                              color: Colors.blue, 
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ] else ...[
+                // 🔴 (اختياري) رسالة تظهر فقط إذا لم توجد إحداثيات لمعرفة السبب
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8.0),
+                  child: Text(
+                    "⚠️ لا يوجد موقع جغرافي لهذا الطلب",
+                    style: TextStyle(color: Colors.orange[800], fontSize: 12),
+                  ),
+                ),
+              ],
+              
+              const SizedBox(height: 5),
+              _buildInfoRow(Icons.attach_money, 'المبلغ:', '${task['grand_total']} ر.س'),
               const SizedBox(height: 8),
-              _buildInfoRow(Icons.attach_money, 'المبلغ المطلوب:', '${task['grand_total']} ر.س'),
-              const SizedBox(height: 8),
-              _buildInfoRow(Icons.access_time, 'وقت الطلب:', task['created_at'].toString().substring(11, 16)),
+              _buildInfoRow(Icons.access_time, 'الوقت:', task['created_at'].toString().substring(11, 16)),
 
               const SizedBox(height: 20),
 
-              // الزر الكبير
+              // زر الإجراء الرئيسي
               SizedBox(
                 width: double.infinity,
                 height: 50,
-                child: isOnWay
-                    ? ElevatedButton.icon(
-                        onPressed: () => updateOrderStatus(task['id'], 'delivered'),
-                        icon: const Icon(Icons.check_circle_outline),
-                        label: const Text('تم التسليم للعميل (إنهاء)'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.green,
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        ),
-                      )
-                    : ElevatedButton.icon(
-                        onPressed: () => updateOrderStatus(task['id'], 'on_way'),
-                        icon: const Icon(Icons.touch_app),
-                        label: const Text('قبول واستلام الطلب'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.blue[800],
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        ),
-                      ),
+                child: ElevatedButton.icon(
+                  onPressed: () => updateOrderStatus(task['id'], isOnWay ? 'delivered' : 'on_way'),
+                  icon: Icon(isOnWay ? Icons.check_circle : Icons.touch_app),
+                  label: Text(isOnWay ? 'تم التسليم' : 'استلام الطلب'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: isOnWay ? Colors.green : Colors.blue[800],
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
               ),
             ],
           ),
         ),
       ),
     );
-  }
-
+  }  
   Widget _buildInfoRow(IconData icon, String label, String value) {
     return Row(
       children: [
